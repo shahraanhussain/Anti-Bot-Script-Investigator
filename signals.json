@@ -1,0 +1,387 @@
+{
+  "version": "1.3.3",
+  "signals": [
+    {
+      "name": "xhr-proto-hook",
+      "category": "instrumentation",
+      "weight": 5,
+      "pattern": "XMLHttpRequest\\s*\\.\\s*prototype\\s*\\.\\s*(?:open|send|setRequestHeader)\\s*="
+    },
+    {
+      "name": "fetch-reassign",
+      "category": "instrumentation",
+      "weight": 5,
+      "pattern": "(?:window|self|globalThis)\\s*\\.\\s*fetch\\s*="
+    },
+    {
+      "name": "proxy-hook-xhr",
+      "category": "instrumentation",
+      "weight": 5,
+      "pattern": "new\\s+Proxy\\s*\\(\\s*(?:self\\.|window\\.)?XMLHttpRequest\\b"
+    },
+    {
+      "name": "proxy-hook-fetch",
+      "category": "instrumentation",
+      "weight": 5,
+      "pattern": "new\\s+Proxy\\s*\\(\\s*(?:self\\.|window\\.)?fetch\\b"
+    },
+    {
+      "name": "proxy-hook-websocket",
+      "category": "instrumentation",
+      "weight": 5,
+      "pattern": "new\\s+Proxy\\s*\\(\\s*(?:self\\.|window\\.)?WebSocket\\b"
+    },
+    {
+      "name": "proxy-with-trap",
+      "category": "instrumentation",
+      "weight": 4,
+      "pattern": "new\\s+Proxy\\s*\\(",
+      "context": "(?:construct|apply|get|set)\\s*:\\s*(?:function|\\()",
+      "contextWindow": 250,
+      "exclude": "__esModule",
+      "excludeWindow": 300
+    },
+    {
+      "name": "prototype-reassign-native",
+      "category": "instrumentation",
+      "weight": 5,
+      "countCap": 2,
+      "pattern": "(?:XMLHttpRequest|HTMLCanvasElement|CanvasRenderingContext2D|WebGLRenderingContext|WebGL2RenderingContext|SubtleCrypto|RTCPeerConnection|RTCDataChannel|Worker|WebSocket|EventSource|Navigator|Screen|Document|Element|Function|Reflect)\\s*\\.\\s*prototype\\s*\\.\\s*\\w+\\s*="
+    },
+    {
+      "name": "prototype-reassign-any",
+      "category": "instrumentation",
+      "weight": 1,
+      "countCap": 10,
+      "pattern": "[A-Za-z_$][\\w$]*\\s*\\.\\s*prototype\\s*\\.\\s*\\w+\\s*=\\s*(?:function|\\()"
+    },
+    {
+      "name": "defineProperty-native-proto",
+      "category": "instrumentation",
+      "weight": 5,
+      "countCap": 2,
+      "pattern": "Object\\s*\\.\\s*defineProperty\\s*\\(\\s*(?:XMLHttpRequest|HTMLCanvasElement|CanvasRenderingContext2D|WebGLRenderingContext|WebGL2RenderingContext|SubtleCrypto|RTCPeerConnection|Worker|WebSocket|Navigator|Function)\\s*\\.\\s*prototype"
+    },
+    {
+      "name": "defineProperty-any-proto",
+      "category": "instrumentation",
+      "weight": 1,
+      "countCap": 10,
+      "pattern": "Object\\s*\\.\\s*defineProperty\\s*\\(\\s*[A-Za-z_$][\\w$]*\\s*\\.\\s*prototype"
+    },
+    {
+      "name": "toString-spoof",
+      "category": "instrumentation",
+      "weight": 4,
+      "pattern": "Function\\s*\\.\\s*prototype\\s*\\.\\s*toString",
+      "context": "(?:value|get|call)\\s*:",
+      "contextWindow": 300
+    },
+    {
+      "name": "weakmap-request",
+      "category": "instrumentation",
+      "weight": 3,
+      "pattern": "new\\s+WeakMap\\s*\\(",
+      "context": "(?:XMLHttpRequest|fetch|Request)\\b",
+      "contextWindow": 600
+    },
+
+    {
+      "name": "akamai-url-fragment",
+      "category": "anti-bot",
+      "weight": 5,
+      "pattern": "[\"']\\/akam\\/\\d+\\/[\"']"
+    },
+    {
+      "name": "akamai-hex-blob",
+      "category": "anti-bot",
+      "weight": 5,
+      "countCap": 2,
+      "pattern": "[\"'][0-9a-f]{500,}[\"']"
+    },
+    {
+      "name": "akamai-cookie-name",
+      "category": "anti-bot",
+      "weight": 4,
+      "pattern": "\\b(?:_abck|bm_sz|ak_bmsc|bm_sv|bm_mi|bm_so|bm_ss|bm_lp)\\b"
+    },
+    {
+      "name": "akamai-botman",
+      "category": "anti-bot",
+      "weight": 4,
+      "pattern": "\\b(?:BotManager|botman|bmak)\\b",
+      "flags": "gi"
+    },
+
+    {
+      "name": "crypto.subtle",
+      "category": "cryptography",
+      "weight": 4,
+      "pattern": "crypto\\s*\\.\\s*subtle"
+    },
+    {
+      "name": "getRandomValues",
+      "category": "cryptography",
+      "weight": 4,
+      "pattern": "\\.\\s*getRandomValues\\s*\\("
+    },
+    {
+      "name": "randomUUID",
+      "category": "cryptography",
+      "weight": 3,
+      "pattern": "\\.\\s*randomUUID\\s*\\("
+    },
+    {
+      "name": "HMAC",
+      "category": "cryptography",
+      "weight": 3,
+      "pattern": "\\bHMAC\\b"
+    },
+    {
+      "name": "digest",
+      "category": "cryptography",
+      "weight": 2,
+      "pattern": "\\.\\s*digest\\s*\\("
+    },
+    {
+      "name": "PRNG-name",
+      "category": "cryptography",
+      "weight": 3,
+      "pattern": "\\b(?:prng|xorshift|mulberry32|sfc32|splitmix|pcg32|murmurhash|xxhash)\\b",
+      "flags": "gi"
+    },
+    {
+      "name": "signature",
+      "category": "cryptography",
+      "weight": 3,
+      "pattern": "\\bsignature\\b",
+      "flags": "gi",
+      "context": "(?:sign\\(|HMAC|SHA|MD5|\\.digest|verify\\(|nonce|header)",
+      "contextWindow": 300
+    },
+    {
+      "name": "nonce",
+      "category": "cryptography",
+      "weight": 1,
+      "pattern": "\\bnonce\\b",
+      "flags": "gi",
+      "countCap": 5
+    },
+
+    {
+      "name": "api_token",
+      "category": "token",
+      "weight": 4,
+      "pattern": "\\b(?:api[_-]?token|access[_-]?token|auth[_-]?token|bearer[_-]?token|refresh[_-]?token|csrf[_-]?token|xsrf[_-]?token)\\b",
+      "flags": "gi"
+    },
+    {
+      "name": "token",
+      "category": "token",
+      "weight": 1,
+      "pattern": "\\btoken\\b",
+      "flags": "gi",
+      "countCap": 5
+    },
+
+    {
+      "name": "fingerprint",
+      "category": "fingerprinting",
+      "weight": 3,
+      "pattern": "\\bfingerprint\\b",
+      "flags": "gi"
+    },
+    {
+      "name": "Canvas",
+      "category": "fingerprinting",
+      "weight": 3,
+      "pattern": "\\b(?:HTMLCanvasElement|CanvasRenderingContext2D|toDataURL|toBlob)\\b",
+      "context": "(?:toDataURL\\s*\\(|toBlob\\s*\\(|getContext\\s*\\(|drawImage\\s*\\()",
+      "contextWindow": 400
+    },
+    {
+      "name": "WebGL",
+      "category": "fingerprinting",
+      "weight": 3,
+      "pattern": "\\b(?:WebGLRenderingContext|WebGL2RenderingContext)\\b",
+      "context": "(?:getParameter\\s*\\(|getExtension\\s*\\()",
+      "contextWindow": 400
+    },
+    {
+      "name": "WebGL-getParameter",
+      "category": "fingerprinting",
+      "weight": 3,
+      "pattern": "getParameter\\s*\\(",
+      "context": "\\b(?:UNMASKED_VENDOR_WEBGL|UNMASKED_RENDERER_WEBGL|37445|37446)\\b",
+      "contextWindow": 500
+    },
+    {
+      "name": "WebRTC",
+      "category": "fingerprinting",
+      "weight": 3,
+      "pattern": "\\b(?:RTCPeerConnection|RTCDataChannel|RTCIceCandidate)\\b"
+    },
+    {
+      "name": "AudioContext",
+      "category": "fingerprinting",
+      "weight": 3,
+      "pattern": "\\b(?:AudioContext|OfflineAudioContext|BaseAudioContext|decodeAudioData)\\b"
+    },
+
+    {
+      "name": "sensor",
+      "category": "anti-bot",
+      "weight": 3,
+      "pattern": "\\bsensor(?:s|data)?\\b",
+      "flags": "gi"
+    },
+    {
+      "name": "challenge",
+      "category": "anti-bot",
+      "weight": 3,
+      "pattern": "\\bchallenge\\b",
+      "flags": "gi"
+    },
+    {
+      "name": "bot",
+      "category": "anti-bot",
+      "weight": 1,
+      "pattern": "\\bbot\\b",
+      "flags": "gi",
+      "exclude": "[\\\"']bot[\\\"']\\s*:",
+      "excludeWindow": 40,
+      "countCap": 5
+    },
+    {
+      "name": "proof",
+      "category": "anti-bot",
+      "weight": 2,
+      "pattern": "\\bproof\\b",
+      "flags": "gi"
+    },
+
+    {
+      "name": "webdriver",
+      "category": "automation",
+      "weight": 4,
+      "pattern": "navigator\\s*\\.\\s*webdriver"
+    },
+    {
+      "name": "automation",
+      "category": "automation",
+      "weight": 2,
+      "pattern": "\\bautomation\\b",
+      "flags": "gi"
+    },
+    {
+      "name": "selenium-phantom",
+      "category": "automation",
+      "weight": 3,
+      "pattern": "\\b(?:__nightmare|callPhantom|_Selenium_IDE_Recorder|_selenium|callSelenium|__driver_evaluate|__webdriver_evaluate)\\b"
+    },
+
+    {
+      "name": "navigator",
+      "category": "browser-signal",
+      "weight": 1,
+      "pattern": "\\bnavigator\\s*\\.",
+      "countCap": 5
+    },
+    {
+      "name": "screen",
+      "category": "browser-signal",
+      "weight": 1,
+      "pattern": "\\bscreen\\s*\\.",
+      "countCap": 5
+    },
+    {
+      "name": "cookie",
+      "category": "browser-signal",
+      "weight": 1,
+      "pattern": "document\\s*\\.\\s*cookie",
+      "countCap": 5
+    },
+    {
+      "name": "client-hints",
+      "category": "browser-signal",
+      "weight": 3,
+      "pattern": "navigator\\s*\\.\\s*userAgentData\\s*\\.\\s*getHighEntropyValues"
+    },
+
+    {
+      "name": "WebAssembly",
+      "category": "runtime",
+      "weight": 4,
+      "pattern": "\\b(?:WebAssembly|wasm)\\b",
+      "flags": "gi"
+    },
+
+    {
+      "name": "fetch",
+      "category": "network",
+      "weight": 2,
+      "pattern": "\\bfetch\\s*\\(",
+      "countCap": 5
+    },
+    {
+      "name": "XMLHttpRequest",
+      "category": "network",
+      "weight": 2,
+      "pattern": "\\bXMLHttpRequest\\b",
+      "countCap": 5
+    },
+    {
+      "name": "sendBeacon",
+      "category": "network",
+      "weight": 3,
+      "pattern": "navigator\\s*\\.\\s*sendBeacon\\s*\\("
+    }
+  ],
+
+  "vendors": [
+    { "match": "tiqcdn\\.com",                    "tag": "vendor:tealium" },
+    { "match": "cookielaw\\.org",                 "tag": "vendor:onetrust" },
+    { "match": "onetrust\\.com",                  "tag": "vendor:onetrust" },
+    { "match": "bazaarvoice\\.com",               "tag": "vendor:bazaarvoice" },
+    { "match": "ugc\\.bazaarvoice\\.com",         "tag": "vendor:bazaarvoice" },
+    { "match": "ywxi\\.net",                      "tag": "vendor:trustedsite" },
+    { "match": "google-analytics\\.com",          "tag": "vendor:ga" },
+    { "match": "googletagmanager\\.com",          "tag": "vendor:gtm" },
+    { "match": "doubleclick\\.net",               "tag": "vendor:doubleclick" },
+    { "match": "hotjar\\.com",                    "tag": "vendor:hotjar" },
+    { "match": "newrelic\\.com",                  "tag": "vendor:newrelic" },
+    { "match": "optimizely\\.com",                "tag": "vendor:optimizely" },
+    { "match": "facebook\\.(?:com|net)",          "tag": "vendor:facebook" },
+    { "match": "fbevents\\.js",                   "tag": "vendor:facebook" },
+    { "match": "segment\\.(?:io|com)",            "tag": "vendor:segment" },
+    { "match": "tealiumiq\\.com",                 "tag": "vendor:tealium" },
+    { "match": "blueconic\\.(?:com|net)",         "tag": "vendor:blueconic" },
+    { "match": "janrain",                         "tag": "vendor:janrain" },
+    { "match": "capture:login",                   "tag": "vendor:janrain" },
+    { "match": "shop\\.pe",                       "tag": "vendor:addshoppers" },
+    { "match": "addshoppers\\.com",               "tag": "vendor:addshoppers" },
+    { "match": "oraclecloud\\.com/Visit",         "tag": "vendor:oracle-unity" },
+    { "match": "occa\\.ocs\\.oraclecloud\\.com",   "tag": "vendor:oracle-unity" },
+    { "match": "recs\\.occa",                     "tag": "vendor:oracle-recs" },
+    { "match": "dotomi\\.com",                    "tag": "vendor:dotomi" },
+    { "match": "googlesyndication\\.com",         "tag": "vendor:googleads" },
+    { "match": "cloudfront\\.net",                "tag": "vendor:cloudfront" },
+
+    { "match": "gstatic\\.com/recaptcha",         "tag": "vendor:recaptcha", "demote": false },
+    { "match": "www\\.google\\.com/recaptcha",    "tag": "vendor:recaptcha", "demote": false },
+
+    { "match": "\\/akam\\/\\d+\\/",               "tag": "vendor:akamai-botmgr", "demote": false },
+    { "match": "akamaihd\\.net",                  "tag": "vendor:akamai-cdn",   "demote": false },
+    { "match": "\\/resources\\/[0-9a-f]{32,}",    "tag": "vendor:obfuscated-hash", "demote": false }
+  ],
+
+  "vendorDemotion": {
+    "structuralFactor": 0.5,
+    "keywordFactor": 0.35
+  },
+
+  "severityThresholds": {
+    "high": 20,
+    "medium": 10
+  }
+}

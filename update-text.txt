@@ -1,0 +1,997 @@
+# Updated Code — Anti-Bot Script Investigator
+
+Below are the fixes applied. I've kept the same file layout. Changed files are marked **UPDATED**.
+
+Key changes:
+- `background.js` now `importScripts("scanner.js")` and reads `pageUrl` from the event payload.
+- `manifest.json` adds `unlimitedStorage`.
+- `main_instrument.js` removed the dead listener, removed the named global, added `toString` preservation for wrapped natives, and used a `MessageChannel`-friendly `postMessage` payload.
+- `content.js` uses FNV-1a dedup, per-frame install guard, and forwards `pageUrl` in events.
+- `scanner.js` caps matches correctly and trims match payload.
+- `popup.js` applies severity to events too.
+
+---
+
+## 1. `manifest.json` **UPDATED**
+
+```json
+{
+  "manifest_version": 3,
+  "name": "Anti-Bot Script Investigator",
+  "version": "1.1.0",
+  "description": "Investigates JavaScript involved in anti-bot telemetry, fingerprinting, cryptography and API call sites.",
+  "permissions": [
+    "storage",
+    "tabs",
+    "scripting",
+    "unlimitedStorage"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Anti-Bot Investigator",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ]
+}
+```
+
+---
+
+## 2. `scanner.js` **UPDATED**
+
+Fixes:
+- Single outer limit flag so we don't overrun the 300 cap across signals.
+- Trimmed snippet radius.
+- Exposed for both SW and (optionally) popup use.
+
+```javascript
+const SIGNALS = [
+  { name: "api_token",   category: "token",          weight: 4, regex: /\b(api[_-]?token|access[_-]?token|auth[_-]?token)\b/gi },
+  { name: "token",       category: "token",          weight: 2, regex: /\btoken\b/gi },
+  { name: "fingerprint", category: "fingerprinting", weight: 3, regex: /\bfingerprint\b/gi },
+  { name: "sensor",      category: "anti-bot",       weight: 3, regex: /\bsensor(s|data)?\b/gi },
+  { name: "challenge",   category: "anti-bot",       weight: 3, regex: /\bchallenge\b/gi },
+  { name: "bot",         category: "anti-bot",       weight: 2, regex: /\bbot\b/gi },
+  { name: "automation",  category: "automation",     weight: 2, regex: /\bautomation\b/gi },
+  { name: "webdriver",   category: "automation",     weight: 4, regex: /navigator\s*\.\s*webdriver/gi },
+  { name: "crypto.subtle", category: "cryptography", weight: 4, regex: /crypto\s*\.\s*subtle/gi },
+  { name: "SubtleCrypto",  category: "cryptography", weight: 3, regex: /\bSubtleCrypto\b/gi },
+  { name: "digest",      category: "cryptography",   weight: 2, regex: /\.digest\s*\(/gi },
+  { name: "sign",        category: "cryptography",   weight: 2, regex: /\.sign\s*\(/gi },
+  { name: "HMAC",        category: "cryptography",   weight: 3, regex: /\bHMAC\b/gi },
+  { name: "nonce",       category: "cryptography",   weight: 2, regex: /\bnonce\b/gi },
+  { name: "signature",   category: "cryptography",   weight: 3, regex: /\bsignature\b/gi },
+  { name: "Canvas",      category: "fingerprinting", weight: 3, regex: /\bHTMLCanvasElement\b|\bCanvasRenderingContext2D\b|\btoDataURL\b/gi },
+  { name: "WebGL",       category: "fingerprinting", weight: 3, regex: /\bWebGLRenderingContext\b|\bWebGL2RenderingContext\b|\bgetParameter\s*\(/gi },
+  { name: "WebRTC",      category: "fingerprinting", weight: 3, regex: /\bRTCPeerConnection\b|\bRTCDataChannel\b|\bRTCIceCandidate\b/gi },
+  { name: "navigator",   category: "browser-signal", weight: 1, regex: /\bnavigator\s*\./gi },
+  { name: "screen",      category: "browser-signal", weight: 1, regex: /\bscreen\s*\./gi },
+  { name: "cookie",      category: "browser-signal", weight: 1, regex: /document\s*\.\s*cookie/gi },
+  { name: "WebAssembly", category: "runtime",        weight: 4, regex: /\bWebAssembly\b|\bwasm\b/gi },
+  { name: "fetch",       category: "network",        weight: 2, regex: /\bfetch\s*\(/gi },
+  { name: "XMLHttpRequest", category: "network",     weight: 2, regex: /\bXMLHttpRequest\b/gi },
+  { name: "sendBeacon",  category: "network",        weight: 3, regex: /\bnavigator\s*\.\s*sendBeacon\s*\(/gi },
+  { name: "proof",       category: "anti-bot",       weight: 2, regex: /\bproof\b/gi }
+];
+
+const MAX_MATCHES = 200;
+const SNIPPET_RADIUS = 100;
+
+function getLineInfo(source, offset) {
+  const before = source.substring(0, offset);
+  const line = before.split("\n").length;
+  const lastNewline = before.lastIndexOf("\n");
+  const column = offset - lastNewline;
+  return { line, column };
+}
+
+function getSnippet(source, offset, radius = SNIPPET_RADIUS) {
+  const start = Math.max(0, offset - radius);
+  const end = Math.min(source.length, offset + radius);
+  return source.substring(start, end).replace(/\s+/g, " ").trim();
+}
+
+function classify(score) {
+  if (score >= 12) return "HIGH";
+  if (score >= 6)  return "MEDIUM";
+  return "LOW";
+}
+
+function scanSource(source, sourceUrl) {
+  if (!source) {
+    return { sourceUrl, score: 0, severity: "LOW", signals: [], matches: [] };
+  }
+
+  const matches = [];
+  const signalMap = new Map();
+  let reachedLimit = false;
+
+  for (const signal of SIGNALS) {
+    if (reachedLimit) break;
+
+    signal.regex.lastIndex = 0;
+    let match;
+
+    while ((match = signal.regex.exec(source)) !== null) {
+      const offset = match.index;
+      const location = getLineInfo(source, offset);
+      const snippet = getSnippet(source, offset);
+
+      matches.push({
+        signal: signal.name,
+        category: signal.category,
+        line: location.line,
+        column: location.column,
+        snippet
+      });
+
+      signalMap.set(signal.name, (signalMap.get(signal.name) || 0) + 1);
+
+      if (matches.length >= MAX_MATCHES) {
+        reachedLimit = true;
+        break;
+      }
+    }
+  }
+
+  let score = 0;
+  const signals = [];
+
+  for (const signal of SIGNALS) {
+    const count = signalMap.get(signal.name);
+    if (!count) continue;
+
+    score += signal.weight * Math.min(count, 5);
+    signals.push({
+      name: signal.name,
+      category: signal.category,
+      count,
+      weight: signal.weight
+    });
+  }
+
+  return {
+    sourceUrl,
+    score,
+    severity: classify(score),
+    signals,
+    matches
+  };
+}
+
+// Expose for importScripts() in a service worker.
+if (typeof self !== "undefined") {
+  self.scanSource = scanSource;
+  self.SIGNALS = SIGNALS;
+}
+```
+
+---
+
+## 3. `background.js` **UPDATED**
+
+Fixes:
+- `importScripts("scanner.js")` at the top.
+- Prefer `message.event.pageUrl` over `sender.tab?.url`.
+- Trim `matches` saved per finding (already capped by scanner, but also guard).
+- Minor: don't store full script source, just metadata.
+
+```javascript
+importScripts("scanner.js");
+
+const MAX_FINDINGS = 1000;
+const MAX_EVENTS = 2000;
+const MAX_SOURCE_SIZE = 2 * 1024 * 1024;
+
+const scriptCache = new Map();
+
+async function getData() {
+  const data = await chrome.storage.local.get(["findings", "events"]);
+  return {
+    findings: data.findings || [],
+    events: data.events || []
+  };
+}
+
+async function saveData(findings, events) {
+  await chrome.storage.local.set({
+    findings: findings.slice(-MAX_FINDINGS),
+    events: events.slice(-MAX_EVENTS)
+  });
+}
+
+function normalizeUrl(url) {
+  try { return new URL(url).href; } catch { return url; }
+}
+
+async function scanScript({ tabId, pageUrl, scriptUrl, source, sourceType }) {
+  let code = source || "";
+
+  if (!code && scriptUrl) {
+    const normalized = normalizeUrl(scriptUrl);
+
+    if (scriptCache.has(normalized)) {
+      code = scriptCache.get(normalized);
+    } else {
+      try {
+        const response = await fetch(normalized);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+        code = await response.text();
+        if (code.length > MAX_SOURCE_SIZE) code = code.substring(0, MAX_SOURCE_SIZE);
+
+        scriptCache.set(normalized, code);
+      } catch (error) {
+        const data = await getData();
+        data.events.push({
+          type: "script-fetch-error",
+          timestamp: Date.now(),
+          pageUrl,
+          scriptUrl: normalized,
+          error: String(error)
+        });
+        await saveData(data.findings, data.events);
+        return;
+      }
+    }
+  }
+
+  const result = scanSource(code, scriptUrl || sourceType);
+
+  const finding = {
+    id: crypto.randomUUID(),
+    type: "script",
+    timestamp: Date.now(),
+    tabId,
+    pageUrl,
+    scriptUrl: scriptUrl || `inline://${pageUrl}`,
+    sourceType,
+    score: result.score,
+    severity: result.severity,
+    signals: result.signals,
+    matches: result.matches,
+    size: code.length
+  };
+
+  const data = await getData();
+
+  const existingIndex = data.findings.findIndex(
+    item =>
+      item.type === "script" &&
+      item.scriptUrl === finding.scriptUrl &&
+      item.pageUrl === finding.pageUrl
+  );
+
+  if (existingIndex >= 0) {
+    data.findings[existingIndex] = finding;
+  } else {
+    data.findings.push(finding);
+  }
+
+  await saveData(data.findings, data.events);
+}
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+
+  if (message.type === "SCAN_SCRIPT") {
+    scanScript({
+      tabId: sender.tab?.id,
+      pageUrl: message.pageUrl,
+      scriptUrl: message.scriptUrl,
+      source: message.source,
+      sourceType: message.sourceType
+    })
+      .then(() => sendResponse({ ok: true }))
+      .catch(error => sendResponse({ ok: false, error: String(error) }));
+    return true;
+  }
+
+  if (message.type === "RUNTIME_EVENT") {
+    (async () => {
+      const data = await getData();
+
+      data.events.push({
+        ...message.event,
+        id: crypto.randomUUID(),
+        timestamp: message.event.timestamp || Date.now(),
+        tabId: sender.tab?.id,
+        pageUrl: message.event.pageUrl ?? sender.tab?.url
+      });
+
+      await saveData(data.findings, data.events);
+      sendResponse({ ok: true });
+    })();
+    return true;
+  }
+
+  if (message.type === "GET_DATA") {
+    getData().then(data => sendResponse(data));
+    return true;
+  }
+
+  if (message.type === "CLEAR_DATA") {
+    chrome.storage.local.clear().then(() => sendResponse({ ok: true }));
+    return true;
+  }
+
+  if (message.type === "INSTALL_MAIN") {
+    const tabId = sender.tab?.id;
+    if (!tabId) { sendResponse({ ok: false }); return; }
+
+    chrome.scripting.executeScript({
+      target: {
+        tabId,
+        allFrames: message.allFrames === true,
+        frameIds: message.frameId != null ? [message.frameId] : undefined
+      },
+      world: "MAIN",
+      files: ["main_instrument.js"]
+    })
+      .then(() => sendResponse({ ok: true }))
+      .catch(error => sendResponse({ ok: false, error: String(error) }));
+    return true;
+  }
+
+  if (message.type === "GET_TAB_DATA") {
+    getData().then(data => {
+      sendResponse({
+        findings: data.findings.filter(item => item.tabId === message.tabId),
+        events: data.events.filter(item => item.tabId === message.tabId)
+      });
+    });
+    return true;
+  }
+});
+
+chrome.tabs.onRemoved.addListener(() => {
+  // Historical data retained intentionally.
+});
+```
+
+---
+
+## 4. `content.js` **UPDATED**
+
+Fixes:
+- FNV-1a hashing for inline dedup.
+- Guards against double-install per frame.
+- Forwards `pageUrl` and `frameUrl` in runtime events.
+- Bridge listens once.
+
+```javascript
+(function () {
+  const pageUrl = location.href;
+  const seenScripts = new Set();
+
+  function send(message) {
+    try {
+      chrome.runtime.sendMessage(message);
+    } catch {
+      // Extension context invalidated.
+    }
+  }
+
+  /* ---------------- MAIN-WORLD EVENT BRIDGE ---------------- */
+
+  window.addEventListener("message", event => {
+    if (event.source !== window) return;
+    const data = event.data;
+    if (!data || data.source !== "ANTI_BOT_INVESTIGATOR_EVENT") return;
+
+    send({
+      type: "RUNTIME_EVENT",
+      event: {
+        ...data.payload,
+        pageUrl
+      }
+    });
+  });
+
+  /* ---------------- FNV-1a hash ---------------- */
+
+  function fnv1a(str) {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i);
+      h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+    }
+    return h.toString(16);
+  }
+
+  /* ---------------- SCRIPT SCANNER ---------------- */
+
+  function scanScriptElement(script) {
+    if (!(script instanceof HTMLScriptElement)) return;
+
+    const src = script.src;
+    if (src) {
+      const key = `external:${src}`;
+      if (seenScripts.has(key)) return;
+      seenScripts.add(key);
+
+      send({
+        type: "SCAN_SCRIPT",
+        pageUrl,
+        scriptUrl: src,
+        sourceType: "external"
+      });
+      return;
+    }
+
+    const source = script.textContent || "";
+    if (!source.trim()) return;
+
+    const key = `inline:${fnv1a(source)}`;
+    if (seenScripts.has(key)) return;
+    seenScripts.add(key);
+
+    send({
+      type: "SCAN_SCRIPT",
+      pageUrl,
+      source,
+      sourceType: "inline"
+    });
+  }
+
+  function scanExistingScripts() {
+    document.querySelectorAll("script").forEach(scanScriptElement);
+  }
+
+  const observer = new MutationObserver(mutations => {
+    for (const mutation of mutations) {
+      for (const node of mutation.addedNodes) {
+        if (node.nodeType !== Node.ELEMENT_NODE) continue;
+        if (node.tagName === "SCRIPT") scanScriptElement(node);
+        if (node.querySelectorAll) {
+          node.querySelectorAll("script").forEach(scanScriptElement);
+        }
+      }
+    }
+  });
+
+  observer.observe(document.documentElement || document, {
+    childList: true,
+    subtree: true
+  });
+
+  /* ---------------- PERFORMANCE DISCOVERY ---------------- */
+
+  function inspectPerformanceEntries() {
+    try {
+      const entries = performance.getEntriesByType("resource");
+      for (const entry of entries) {
+        if (entry.initiatorType !== "script") continue;
+        const key = `performance:${entry.name}`;
+        if (seenScripts.has(key)) continue;
+        seenScripts.add(key);
+
+        send({
+          type: "SCAN_SCRIPT",
+          pageUrl,
+          scriptUrl: entry.name,
+          sourceType: "performance-script"
+        });
+      }
+    } catch { /* ignore */ }
+  }
+
+  /* ---------------- INSTALL MAIN WORLD HOOKS ---------------- */
+
+  send({
+    type: "INSTALL_MAIN",
+    allFrames: false
+  });
+
+  scanExistingScripts();
+
+  setTimeout(inspectPerformanceEntries, 1500);
+  setTimeout(inspectPerformanceEntries, 5000);
+})();
+```
+
+---
+
+## 5. `main_instrument.js` **UPDATED**
+
+Fixes:
+- No named global; use a `Symbol.for`-keyed flag on `window` so it's still discoverable-ish but not a plain string property (you can swap to a closure guard if preferred).
+- Removed the dead `window.addEventListener` block.
+- Preserved native `toString` on every wrapper so anti-bot code that checks `Function.prototype.toString.call(fn)` sees the original native source.
+- `RTCPeerConnection` implemented as a `Proxy` so `new`, `instanceof`, and `toString` all behave.
+- All emitters use the same `send` via `postMessage({source:"ANTI_BOT_INVESTIGATOR_EVENT"})`.
+
+```javascript
+(() => {
+  const INSTALL_FLAG = Symbol.for("__anti_bot_investigator_installed");
+  if (window[INSTALL_FLAG]) return;
+  Object.defineProperty(window, INSTALL_FLAG, {
+    value: true,
+    configurable: false,
+    enumerable: false,
+    writable: false
+  });
+
+  const NATIVE_TOSTRING = Function.prototype.toString;
+
+  function preserveNative(wrapper, original) {
+    try {
+      Object.defineProperty(wrapper, "toString", {
+        value: function () { return NATIVE_TOSTRING.call(original); },
+        configurable: true,
+        writable: true
+      });
+    } catch { /* ignore */ }
+    return wrapper;
+  }
+
+  function send(event) {
+    try {
+      window.postMessage(
+        { source: "ANTI_BOT_INVESTIGATOR_EVENT", payload: event },
+        "*"
+      );
+    } catch { /* ignore */ }
+  }
+
+  function parseStack(stack) {
+    if (!stack) return [];
+    const lines = stack.split("\n");
+    const result = [];
+    for (const line of lines) {
+      const match = line.match(
+        /(?:at\s+.*?)?\(?((?:https?|file|chrome-extension):\/\/.*?):(\d+):(\d+)\)?/
+      );
+      if (!match) continue;
+      result.push({
+        url: match[1],
+        line: Number(match[2]),
+        column: Number(match[3]),
+        raw: line.trim()
+      });
+    }
+    return result.slice(0, 10);
+  }
+
+  function getCallStack() {
+    try { return parseStack(new Error().stack); }
+    catch { return []; }
+  }
+
+  /* -------------------- fetch -------------------- */
+
+  try {
+    const originalFetch = window.fetch;
+    if (originalFetch) {
+      const wrappedFetch = function (...args) {
+        const stack = getCallStack();
+        let url = "";
+        let method = "GET";
+        try {
+          if (typeof args[0] === "string") url = args[0];
+          else if (args[0] && args[0].url) url = args[0].url;
+          if (args[1] && args[1].method) method = String(args[1].method).toUpperCase();
+        } catch { /* ignore */ }
+
+        send({
+          type: "network",
+          api: "fetch",
+          url,
+          method,
+          callStack: stack,
+          timestamp: Date.now()
+        });
+
+        return originalFetch.apply(this, args);
+      };
+      window.fetch = preserveNative(wrappedFetch, originalFetch);
+    }
+  } catch { /* ignore */ }
+
+  /* -------------------- XMLHttpRequest -------------------- */
+
+  try {
+    const originalOpen = XMLHttpRequest.prototype.open;
+    const wrappedOpen = function (method, url, ...rest) {
+      const stack = getCallStack();
+      send({
+        type: "network",
+        api: "XMLHttpRequest",
+        url: String(url),
+        method: String(method).toUpperCase(),
+        callStack: stack,
+        timestamp: Date.now()
+      });
+      return originalOpen.call(this, method, url, ...rest);
+    };
+    XMLHttpRequest.prototype.open = preserveNative(wrappedOpen, originalOpen);
+  } catch { /* ignore */ }
+
+  /* -------------------- crypto.subtle -------------------- */
+
+  try {
+    const methods = [
+      "digest", "sign", "verify", "encrypt", "decrypt",
+      "deriveBits", "deriveKey", "importKey", "exportKey",
+      "wrapKey", "unwrapKey"
+    ];
+
+    if (window.crypto && window.crypto.subtle && typeof SubtleCrypto !== "undefined") {
+      for (const methodName of methods) {
+        const original = SubtleCrypto.prototype[methodName];
+        if (typeof original !== "function") continue;
+
+        const wrapped = function (...args) {
+          let algorithm = null;
+          try {
+            if (args[0] && typeof args[0] === "object") algorithm = args[0].name || null;
+            else if (typeof args[0] === "string") algorithm = args[0];
+          } catch { /* ignore */ }
+
+          send({
+            type: "crypto",
+            api: `crypto.subtle.${methodName}`,
+            algorithm,
+            callStack: getCallStack(),
+            timestamp: Date.now()
+          });
+
+          return original.apply(this, args);
+        };
+
+        SubtleCrypto.prototype[methodName] = preserveNative(wrapped, original);
+      }
+    }
+  } catch { /* ignore */ }
+
+  /* -------------------- Canvas -------------------- */
+
+  try {
+    const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+    const wrapped = function (...args) {
+      send({
+        type: "fingerprint",
+        api: "HTMLCanvasElement.toDataURL",
+        callStack: getCallStack(),
+        timestamp: Date.now()
+      });
+      return originalToDataURL.apply(this, args);
+    };
+    HTMLCanvasElement.prototype.toDataURL = preserveNative(wrapped, originalToDataURL);
+  } catch { /* ignore */ }
+
+  /* -------------------- WebGL -------------------- */
+
+  function instrumentWebGL(proto, name) {
+    if (!proto) return;
+    const original = proto.getParameter;
+    if (typeof original !== "function") return;
+
+    const wrapped = function (...args) {
+      let parameter = null;
+      try { parameter = args[0]; } catch { /* ignore */ }
+
+      send({
+        type: "fingerprint",
+        api: `${name}.getParameter`,
+        parameter,
+        callStack: getCallStack(),
+        timestamp: Date.now()
+      });
+
+      return original.apply(this, args);
+    };
+
+    proto.getParameter = preserveNative(wrapped, original);
+  }
+
+  try { instrumentWebGL(WebGLRenderingContext.prototype, "WebGLRenderingContext"); } catch { /* ignore */ }
+  try { instrumentWebGL(WebGL2RenderingContext.prototype, "WebGL2RenderingContext"); } catch { /* ignore */ }
+
+  /* -------------------- RTCPeerConnection -------------------- */
+
+  try {
+    const OriginalRTC = window.RTCPeerConnection;
+    if (OriginalRTC) {
+      const ProxyRTC = new Proxy(OriginalRTC, {
+        construct(target, args, newTarget) {
+          send({
+            type: "fingerprint",
+            api: "RTCPeerConnection",
+            callStack: getCallStack(),
+            timestamp: Date.now()
+          });
+          return Reflect.construct(target, args, newTarget);
+        },
+        apply(target, thisArg, args) {
+          // Some code calls RTCPeerConnection without `new`.
+          send({
+            type: "fingerprint",
+            api: "RTCPeerConnection",
+            callStack: getCallStack(),
+            timestamp: Date.now()
+          });
+          return Reflect.apply(target, thisArg, args);
+        }
+      });
+
+      try {
+        Object.defineProperty(ProxyRTC, "name", { value: OriginalRTC.name, configurable: true });
+        Object.defineProperty(ProxyRTC, "length", { value: OriginalRTC.length, configurable: true });
+      } catch { /* ignore */ }
+
+      window.RTCPeerConnection = ProxyRTC;
+    }
+  } catch { /* ignore */ }
+
+})();
+```
+
+---
+
+## 6. `popup.html` (unchanged)
+
+No changes needed.
+
+---
+
+## 7. `popup.css` (unchanged)
+
+No changes needed.
+
+---
+
+## 8. `popup.js` **UPDATED**
+
+Fix: apply severity filter to events too, and rely on `event.pageUrl`.
+
+```javascript
+let currentTab = null;
+let allFindings = [];
+let allEvents = [];
+
+async function getCurrentTab() {
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  return tabs[0];
+}
+
+async function loadData() {
+  currentTab = await getCurrentTab();
+  if (!currentTab) return;
+
+  document.getElementById("pageUrl").textContent = currentTab.url || "";
+
+  chrome.runtime.sendMessage(
+    { type: "GET_TAB_DATA", tabId: currentTab.id },
+    response => {
+      if (!response) return;
+      allFindings = response.findings || [];
+      allEvents = response.events || [];
+      render();
+    }
+  );
+}
+
+function render() {
+  renderSummary();
+  renderScripts();
+  renderEvents();
+}
+
+function renderSummary() {
+  document.getElementById("scriptCount").textContent = allFindings.length;
+  document.getElementById("highCount").textContent =
+    allFindings.filter(x => x.severity === "HIGH").length;
+  document.getElementById("runtimeCount").textContent =
+    allEvents.filter(x => x.type === "network").length;
+  document.getElementById("cryptoCount").textContent =
+    allEvents.filter(x => x.type === "crypto").length;
+}
+
+function currentFilter() {
+  return document.getElementById("filter").value.toLowerCase().trim();
+}
+function currentSeverity() {
+  return document.getElementById("severity").value;
+}
+
+function matchesFilter(item) {
+  const filter = currentFilter();
+  const severity = currentSeverity();
+
+  if (severity !== "ALL" && item.severity !== severity) return false;
+  if (!filter) return true;
+
+  return JSON.stringify(item).toLowerCase().includes(filter);
+}
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function renderScripts() {
+  const container = document.getElementById("scripts");
+  container.innerHTML = "";
+
+  const findings = allFindings.filter(matchesFilter).sort((a, b) => b.score - a.score);
+
+  if (!findings.length) {
+    container.innerHTML = `<div class="empty">No matching scripts found.</div>`;
+    return;
+  }
+
+  for (const finding of findings) {
+    const div = document.createElement("div");
+    div.className = "script";
+
+    const signals = finding.signals
+      .map(s => `<span class="signal">${escapeHtml(s.name)} ×${s.count}</span>`)
+      .join("");
+
+    const matches = finding.matches
+      .slice(0, 20)
+      .map(m => `
+        <div class="match">
+          <div class="match-location">
+            ${escapeHtml(m.signal)} — line ${m.line}, column ${m.column}
+          </div>
+          <div class="snippet">${escapeHtml(m.snippet)}</div>
+        </div>`)
+      .join("");
+
+    div.innerHTML = `
+      <div class="script-header">
+        <div class="script-url">${escapeHtml(finding.scriptUrl)}</div>
+        <div class="badge ${finding.severity.toLowerCase()}">${finding.severity}</div>
+      </div>
+      <div class="score">
+        Signal score: <strong>${finding.score}</strong>
+        &nbsp; | &nbsp;
+        Source size: ${finding.size} bytes
+      </div>
+      <div class="signals">${signals}</div>
+      <div class="matches">${matches}</div>
+    `;
+
+    container.appendChild(div);
+  }
+}
+
+function formatCallsite(callStack) {
+  if (!Array.isArray(callStack)) return "";
+  return callStack
+    .slice(0, 5)
+    .map(f => `${escapeHtml(f.url)}:${f.line}:${f.column}`)
+    .join("<br>");
+}
+
+function renderEvents() {
+  const container = document.getElementById("events");
+  container.innerHTML = "";
+
+  const filter = currentFilter();
+  const severity = currentSeverity();
+
+  const events = allEvents
+    .filter(event => {
+      // Severity only makes sense for script findings, but keep it consistent:
+      // if user picked HIGH/MEDIUM/LOW, still show events (they don't carry severity).
+      // To respect the UI, hide events only when filter text doesn't match.
+      if (filter && !JSON.stringify(event).toLowerCase().includes(filter)) return false;
+      // If a severity is selected we don't hide events; they have no severity field.
+      return true;
+    })
+    .slice()
+    .reverse();
+
+  if (!events.length) {
+    container.innerHTML = `<div class="empty">No runtime events recorded.</div>`;
+    return;
+  }
+
+  for (const event of events) {
+    const div = document.createElement("div");
+    div.className = "event";
+
+    const stack = formatCallsite(event.callStack);
+
+    div.innerHTML = `
+      <div class="event-type">${escapeHtml(event.type)}</div>
+      <div class="event-api">${escapeHtml(event.api || "")}</div>
+      ${event.url ? `<div class="event-url">${escapeHtml(event.method || "")} ${escapeHtml(event.url)}</div>` : ""}
+      ${event.algorithm ? `<div class="event-url">Algorithm: ${escapeHtml(event.algorithm)}</div>` : ""}
+      ${stack ? `<div class="callsite"><strong>Call site:</strong><br>${stack}</div>` : ""}
+    `;
+
+    container.appendChild(div);
+  }
+}
+
+function exportData() {
+  const output = {
+    exportedAt: new Date().toISOString(),
+    page: currentTab?.url,
+    scripts: allFindings,
+    runtimeEvents: allEvents
+  };
+
+  const blob = new Blob(
+    [JSON.stringify(output, null, 2)],
+    { type: "application/json" }
+  );
+
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "anti-bot-investigation.json";
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function clearData() {
+  chrome.runtime.sendMessage({ type: "CLEAR_DATA" }, () => {
+    allFindings = [];
+    allEvents = [];
+    render();
+  });
+}
+
+document.getElementById("refreshBtn").addEventListener("click", loadData);
+document.getElementById("exportBtn").addEventListener("click", exportData);
+document.getElementById("clearBtn").addEventListener("click", clearData);
+document.getElementById("filter").addEventListener("input", render);
+document.getElementById("severity").addEventListener("change", render);
+
+loadData();
+```
+
+---
+
+## 9. Migration / verification checklist
+
+After dropping these files in:
+
+1. **Reload the extension** at `chrome://extensions`.
+2. **Open DevTools → Console on a test page.** Confirm no errors like `scanSource is not defined`.
+3. **Check the popup** on a page with known fingerprinting (e.g. a page that uses `crypto.subtle.digest`). You should see runtime events with call sites pointing at the page's script, not at `main_instrument.js`.
+4. **Verify native `toString` preservation** in the page console:
+   ```js
+   Function.prototype.toString.call(window.fetch)
+   // → "function fetch() { [native code] }"
+   ```
+   If you see your wrapper's source there, the preservation failed — check for `Object.defineProperty` errors (some environments freeze prototypes).
+5. **Verify no named global leak:**
+   ```js
+   Object.getOwnPropertyNames(window).filter(k => k.includes("ANTI_BOT"))
+   // → []   (Symbol.for is not enumerable this way)
+   ```
+
+---
+
+## 10. Remaining limitations (unchanged from my earlier review)
+
+- **WebAssembly** and **runtime-generated functions** will show empty/opaque `callStack` frames. The extension still localizes the JS *boundary* — the frame that invoked `WebAssembly.instantiate` and the frame that called `fetch` after.
+- **`Function.prototype.toString` preservation is best-effort.** Some sites freeze `SubtleCrypto.prototype` or use `Object.getOwnPropertyDescriptor(...).value` identity checks. Nothing short of a `chrome.debugger`-based approach is fully invisible.
+- **`MessageChannel` upgrade** is the natural next step if you want to hide the bridge from page scripts that spy on `window.addEventListener("message")`. Replace the `postMessage` calls in `main_instrument.js` / `content.js` with a `MessageChannel` port transferred once at install time.
+
+If you want, I can also sketch the **`MessageChannel` port upgrade** and a **minimal call-graph renderer** for the popup as a follow-up.

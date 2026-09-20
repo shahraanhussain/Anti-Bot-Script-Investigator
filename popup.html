@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Anti-Bot Investigator</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Anti-Bot Script Investigator</h1>
+      <div id="pageUrl" class="page-url">Loading…</div>
+    </div>
+    <div class="controls">
+      <label class="toggle" title="When ON, captures Authorization headers, cookies, request/response bodies, and generated tokens.">
+        <input type="checkbox" id="captureToggle">
+        <span>Capture Secrets</span>
+      </label>
+      <select id="tier" title="Instrumentation tier">
+        <option value="0">Passive</option>
+        <option value="1">Observation</option>
+        <option value="2">Intrusive</option>
+      </select>
+      <button id="refreshBtn" type="button">Refresh</button>
+      <button id="exportBtn"  type="button">Export</button>
+      <button id="clearBtn"   type="button">Clear</button>
+    </div>
+  </header>
+
+  <div id="secretWarning" class="secret-warning" hidden>
+    <strong>⚠ Secret capture is ON.</strong>
+    Request headers, cookies, request/response bodies, and likely tokens are being stored in
+    <code>chrome.storage.local</code>. Only enable this on systems you are authorized to test.
+    Values are masked by default; click <em>Reveal</em> on any row to show it.
+  </div>
+
+  <section class="summary">
+    <div class="card"><span>Scripts</span>       <strong id="scriptCount">0</strong></div>
+    <div class="card"><span>High Signal</span>   <strong id="highCount">0</strong></div>
+    <div class="card"><span>Runtime APIs</span>  <strong id="runtimeCount">0</strong></div>
+    <div class="card"><span>Crypto Calls</span>  <strong id="cryptoCount">0</strong></div>
+    <div class="card"><span>Fingerprint</span>   <strong id="fpCount">0</strong></div>
+    <div class="card"><span>Secrets</span>       <strong id="secretCount">0</strong></div>
+  </section>
+
+  <section class="filters">
+    <input  id="filter" type="text" placeholder="Filter scripts, URLs, signals…">
+    <select id="severity">
+      <option value="ALL">All</option>
+      <option value="HIGH">High</option>
+      <option value="MEDIUM">Medium</option>
+      <option value="LOW">Low</option>
+    </select>
+    <select id="vendorFilter">
+      <option value="ALL">All sources</option>
+      <option value="FIRST_PARTY">First-party only</option>
+      <option value="HIDE_VENDORS">Hide known vendors</option>
+      <option value="VENDORS_ONLY">Known vendors only</option>
+    </select>
+  </section>
+
+  <main>
+    <section>
+      <h2>Candidate Scripts</h2>
+      <div id="scripts" class="scripts"></div>
+    </section>
+
+    <section>
+      <h2>Secrets &amp; Sensitive Data</h2>
+      <div class="secret-actions">
+        <button id="cookiesBtn"   type="button">Read all cookies for this tab (incl. HttpOnly)</button>
+        <button id="clearSecretsBtn" type="button">Clear captured secrets</button>
+      </div>
+      <div id="secrets" class="secrets"></div>
+    </section>
+
+    <section>
+      <h2>Runtime Activity</h2>
+      <div id="events" class="events"></div>
+    </section>
+  </main>
+
+  <section class="logblock">
+    <div class="logblock-header">
+      <h2>Diagnostic Log</h2>
+      <div class="logblock-actions">
+        <input id="logFilter" type="text" placeholder="Filter log lines…">
+        <button id="logDownloadBtn" type="button">Download log</button>
+        <button id="logClearBtn"   type="button">Clear log</button>
+      </div>
+    </div>
+    <pre id="logOutput" class="log-output"></pre>
+  </section>
+
+  <script src="abi_log.js"></script>
+  <script src="secret_capture.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>
